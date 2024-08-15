@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -94,14 +92,6 @@ func newMergeTx(source, alias string, target *KismetDatabase) (*mergeTx, error) 
 		return nil, fmt.Errorf("failed to attach %s: %w", source, err)
 	}
 	return &mergeTx{alias: alias, tx: tx}, nil
-}
-
-func (kdb *KismetDatabase) Vacuum() error {
-	if cwd, _ := os.Getwd(); cwd != "" {
-		kdb.setTmpDir(filepath.Join(cwd, ".sqlite_tmp"))
-	}
-	_, err := kdb.conn.Exec("VACUUM")
-	return err
 }
 
 func ingestTenSources(target *KismetDatabase, tableNames []string, sources []string) error {
@@ -233,16 +223,22 @@ func (mtx *mergeTx) attachedInsert(table, alias string) *SQLiteError {
 	return NewSQLiteError(err)
 }
 
-func (kdb *KismetDatabase) setTmpDir(path string) {
-	kdb.setTmpOnce.Do(func() {
-		_ = os.MkdirAll(path, 0755)
-		_, tmpDirErr := kdb.conn.Exec("PRAGMA temp_store_directory = '" + path + "';")
-		if tmpDirErr != nil {
-			println("WARN: unable to set tmp dir", tmpDirErr.Error())
-			return
-		}
-		kdb.newTmpDir = path
-	})
+func tidyUp(target *KismetDatabase) error {
+	var err error
+
+	print("\nvacuuming...")
+	if err = target.Vacuum(); err != nil {
+		return fmt.Errorf("failed to vacuum during merge: %w", err)
+	}
+	print("done\n")
+
+	print("analyzing...")
+	if err = target.Analyze(); err != nil {
+		return fmt.Errorf("failed to analyze during merge: %w", err)
+	}
+	print("done\n\n")
+
+	return nil
 }
 
 func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
@@ -260,11 +256,9 @@ func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
 		if err = ingestTenSources(target, tableNames, group); err != nil {
 			return err
 		}
-		print("\nvacuuming...")
-		if err = target.Vacuum(); err != nil {
-			return fmt.Errorf("failed to vacuum during merge: %w", err)
+		if err = tidyUp(target); err != nil {
+			return err
 		}
-		print("done\n\n")
 	}
 
 	println("committing...")

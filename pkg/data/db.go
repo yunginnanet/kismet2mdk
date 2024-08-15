@@ -34,8 +34,37 @@ type KismetDatabase struct {
 	path string
 	conn *sql.DB
 
-	setTmpOnce sync.Once
-	newTmpDir  string
+	pragma map[Pragma]string
+	mu     sync.Mutex
+
+	newTmpDir string
+}
+
+func (kdb *KismetDatabase) backupPragma(s Pragma) error {
+	var pragma string
+	if err := kdb.conn.QueryRow("PRAGMA " + string(s)).Scan(&pragma); err != nil {
+		return fmt.Errorf("failed to backup pragma %s: %w", s, err)
+	}
+	kdb.mu.Lock()
+	kdb.pragma[s] = pragma
+	kdb.mu.Unlock()
+	return nil
+}
+
+func (kdb *KismetDatabase) checkBackupPragma(s Pragma) string {
+	kdb.mu.Lock()
+	r, ok := kdb.pragma[s]
+	kdb.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return r
+}
+
+func (kdb *KismetDatabase) clearPragmaBackup(s Pragma) {
+	kdb.mu.Lock()
+	delete(kdb.pragma, s)
+	kdb.mu.Unlock()
 }
 
 func CheckKismetSchema(db *sql.DB) error {
@@ -69,6 +98,7 @@ func OpenKismetDatabase(path string) (*KismetDatabase, error) {
 	}
 
 	kdb := new(KismetDatabase)
+	kdb.pragma = make(map[Pragma]string)
 	kdb.path = path
 	if kdb.conn, err = sql.Open("sqlite", path); err != nil {
 		return nil, fmt.Errorf("sql: %w", err)
@@ -92,6 +122,16 @@ func OpenKismetDatabase(path string) (*KismetDatabase, error) {
 
 func (kdb *KismetDatabase) tables() (*sql.Rows, error) {
 	return kdb.conn.Query("SELECT name FROM sqlite_master WHERE type='table'")
+}
+
+func (kdb *KismetDatabase) Vacuum() error {
+	_, err := kdb.conn.Exec("VACUUM")
+	return err
+}
+
+func (kdb *KismetDatabase) Analyze() error {
+	_, err := kdb.conn.Exec("ANALYZE")
+	return err
 }
 
 func (kdb *KismetDatabase) Close() error {
