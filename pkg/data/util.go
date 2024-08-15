@@ -94,6 +94,11 @@ func newMergeTx(source, alias string, target *KismetDatabase) (*mergeTx, error) 
 	return &mergeTx{alias: alias, tx: tx}, nil
 }
 
+func (kdb *KismetDatabase) Vacuum() error {
+	_, err := kdb.conn.Exec("VACUUM")
+	return err
+}
+
 func ingestTenSources(target *KismetDatabase, tableNames []string, sources []string) error {
 	if len(sources) > 10 {
 		return errors.New("oversized sources slice")
@@ -133,6 +138,7 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 	}()
 
 	var waitExp = &atomic.Int64{}
+	waitExp.Add(1)
 
 	for incomingMergeTx := range merges {
 		wg2.Add(1)
@@ -142,14 +148,22 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 
 			for _, t := range tableNames {
 				wg3.Add(1)
-				go func(tn string) {
-					println("inserting values from", mtx.alias, "for table", tn)
+				go func(mtxInner *mergeTx, tn string) {
+					defer wg3.Done()
+
+					if mtxInner == nil {
+						return
+					}
+
+					println("inserting values from", mtxInner.alias, "for table", tn)
 
 					var err = &SQLiteError{}
 
 					ins := func() *SQLiteError {
-						return mtx.attachedInsert(tn, mtx.alias)
+						return mtxInner.attachedInsert(tn, mtxInner.alias)
 					}
+
+					tries := 0
 
 					//goland:noinspection GoDirectComparisonOfErrors
 					for {
@@ -157,16 +171,18 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 						if (err != nil && !err.IsBusy()) || err == nil {
 							break
 						}
-						waitExp.Add(1)
-						println(mtx.alias + "." + tn + ": database busy (" + strconv.Itoa(int(waitExp.Load())) + "), waiting...")
+						tries++
+						if tries%2 == 1 {
+							waitExp.Add(1)
+						}
+						println(mtxInner.alias + "." + tn + ": database busy (" + strconv.Itoa(int(waitExp.Load())) + "), waiting...")
 						entropy.RandSleepMS(100 * int(waitExp.Load()))
 					}
 					if err != nil {
-						errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtx.alias, tn, err.e)
+						errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtxInner.alias, tn, err.e)
 					}
 
-					wg3.Done()
-				}(t)
+				}(mtx, t)
 			}
 
 			wg3.Wait()
@@ -225,6 +241,11 @@ func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
 		if err = ingestTenSources(target, tableNames, group); err != nil {
 			return err
 		}
+		print("\nvacuuming...")
+		if err = target.Vacuum(); err != nil {
+			return fmt.Errorf("failed to vacuum during merge: %w", err)
+		}
+		print("done\n")
 	}
 
 	println("committing...")
