@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	_ "github.com/glebarez/go-sqlite"
 )
@@ -32,6 +33,9 @@ func tableExistsQuery(name string) string {
 type KismetDatabase struct {
 	path string
 	conn *sql.DB
+
+	setTmpOnce sync.Once
+	newTmpDir  string
 }
 
 func CheckKismetSchema(db *sql.DB) error {
@@ -91,5 +95,10 @@ func (kdb *KismetDatabase) tables() (*sql.Rows, error) {
 }
 
 func (kdb *KismetDatabase) Close() error {
+	if kdb.newTmpDir != "" {
+		defer func(td string) {
+			_ = os.RemoveAll(td)
+		}(kdb.newTmpDir)
+	}
 	return kdb.conn.Close()
 }

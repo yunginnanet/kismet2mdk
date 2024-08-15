@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -95,6 +97,9 @@ func newMergeTx(source, alias string, target *KismetDatabase) (*mergeTx, error) 
 }
 
 func (kdb *KismetDatabase) Vacuum() error {
+	if cwd, _ := os.Getwd(); cwd != "" {
+		kdb.setTmpDir(filepath.Join(cwd, ".sqlite_tmp"))
+	}
 	_, err := kdb.conn.Exec("VACUUM")
 	return err
 }
@@ -128,12 +133,12 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 		}(i)
 	}
 
-	wg2 := sync.WaitGroup{}
+	// wg2 := sync.WaitGroup{}
 
 	go func() {
 		wg.Wait()
 		close(merges)
-		wg2.Wait()
+		// wg2.Wait()
 		close(doneCh1)
 	}()
 
@@ -141,64 +146,66 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 	waitExp.Add(1)
 
 	for incomingMergeTx := range merges {
-		wg2.Add(1)
+		// wg2.Add(1)
 
-		go func(mtx *mergeTx) {
-			wg3 := sync.WaitGroup{}
+		mtx := incomingMergeTx
 
-			for _, t := range tableNames {
-				wg3.Add(1)
-				go func(mtxInner *mergeTx, tn string) {
-					defer wg3.Done()
+		// go func(mtx *mergeTx) {
+		wg3 := sync.WaitGroup{}
 
-					if mtxInner == nil {
-						return
+		for _, t := range tableNames {
+			wg3.Add(1)
+			go func(mtxInner *mergeTx, tn string) {
+				defer wg3.Done()
+
+				if mtxInner == nil {
+					return
+				}
+
+				println("inserting values from", mtxInner.alias, "for table", tn)
+
+				var err = &SQLiteError{}
+
+				ins := func() *SQLiteError {
+					return mtxInner.attachedInsert(tn, mtxInner.alias)
+				}
+
+				tries := 0
+
+				//goland:noinspection GoDirectComparisonOfErrors
+				for {
+					err = ins()
+					if (err != nil && !err.IsBusy()) || err == nil {
+						break
 					}
-
-					println("inserting values from", mtxInner.alias, "for table", tn)
-
-					var err = &SQLiteError{}
-
-					ins := func() *SQLiteError {
-						return mtxInner.attachedInsert(tn, mtxInner.alias)
+					tries++
+					if tries%2 == 1 {
+						waitExp.Add(1)
 					}
+					println(mtxInner.alias + "." + tn + ": database busy (" + strconv.Itoa(int(waitExp.Load())) + "), waiting...")
+					entropy.RandSleepMS(100 * int(waitExp.Load()))
+				}
+				if err != nil {
+					errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtxInner.alias, tn, err.e)
+				}
 
-					tries := 0
+			}(mtx, t)
+		}
 
-					//goland:noinspection GoDirectComparisonOfErrors
-					for {
-						err = ins()
-						if (err != nil && !err.IsBusy()) || err == nil {
-							break
-						}
-						tries++
-						if tries%2 == 1 {
-							waitExp.Add(1)
-						}
-						println(mtxInner.alias + "." + tn + ": database busy (" + strconv.Itoa(int(waitExp.Load())) + "), waiting...")
-						entropy.RandSleepMS(100 * int(waitExp.Load()))
-					}
-					if err != nil {
-						errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtxInner.alias, tn, err.e)
-					}
+		wg3.Wait()
 
-				}(mtx, t)
-			}
+		if _, err := mtx.tx.Prepare(detachQuery(mtx.alias)); err != nil {
+			errs <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
+		}
 
-			wg3.Wait()
+		println("committing " + mtx.alias + "...")
+		if err := mtx.tx.Commit(); err != nil {
+			errs <- fmt.Errorf("failed to commit transaction: %w", err)
+		}
 
-			if _, err := mtx.tx.Prepare(detachQuery(mtx.alias)); err != nil {
-				errs <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
-			}
+		// wg2.Done()
 
-			println("committing " + mtx.alias + "...")
-			if err := mtx.tx.Commit(); err != nil {
-				errs <- fmt.Errorf("failed to commit transaction: %w", err)
-			}
-
-			wg2.Done()
-
-		}(incomingMergeTx)
+		// }(incomingMergeTx)
 	}
 
 snoozin:
@@ -226,6 +233,18 @@ func (mtx *mergeTx) attachedInsert(table, alias string) *SQLiteError {
 	return NewSQLiteError(err)
 }
 
+func (kdb *KismetDatabase) setTmpDir(path string) {
+	kdb.setTmpOnce.Do(func() {
+		_ = os.MkdirAll(path, 0755)
+		_, tmpDirErr := kdb.conn.Exec("PRAGMA temp_store_directory = '" + path + "';")
+		if tmpDirErr != nil {
+			println("WARN: unable to set tmp dir", tmpDirErr.Error())
+			return
+		}
+		kdb.newTmpDir = path
+	})
+}
+
 func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
 	grouped, err := gatherSources(sources...)
 	if err != nil {
@@ -245,7 +264,7 @@ func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
 		if err = target.Vacuum(); err != nil {
 			return fmt.Errorf("failed to vacuum during merge: %w", err)
 		}
-		print("done\n")
+		print("done\n\n")
 	}
 
 	println("committing...")
