@@ -1,3 +1,7 @@
 .idea/
 .continueignore
 scratch/
+cmd/merge/merge
+cmd/merge/merged.kismet
+*.kismet-journal
+

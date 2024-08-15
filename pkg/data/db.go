@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/davecgh/go-spew/spew"
 	_ "github.com/glebarez/go-sqlite"
 )
 
@@ -80,9 +79,8 @@ func OpenKismetDatabase(path string) (*KismetDatabase, error) {
 		return nil, fmt.Errorf("sql, failed to assure schema: %w", err)
 	}
 
-	if res != nil {
-		println("wrote schema:")
-		spew.Dump(res)
+	if affected, _ := res.RowsAffected(); affected > 0 {
+		println("wrote schema to db at", path)
 	}
 
 	return kdb, nil

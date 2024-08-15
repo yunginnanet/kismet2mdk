@@ -6,14 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-)
 
-type table struct {
-	Type      sql.NullString `sql:"type"`
-	Name      sql.NullString `sql:"name"`
-	TableName sql.NullString `sql:"tbl_name"`
-	RootPage  sql.NullInt64  `sql:"rootpage"`
-}
+	"git.tcp.direct/kayos/common/entropy"
+)
 
 func attachQuery(file, name string) string {
 	return "ATTACH" + " '" + file + "' AS " + name + ";"
@@ -24,21 +19,21 @@ func detachQuery(alias string) string {
 }
 
 func gatherSources(sources ...string) ([][]string, error) {
-	groupedSources := make([][]string, len(sources)/10)
+	groupedSources := make([][]string, 0, (len(sources)/10)+1)
 
 	groupIndex := 0
 	innerIndex := 0
 
 	for _, source := range sources {
-		if groupedSources[groupIndex] == nil {
-			groupedSources[groupIndex] = make([]string, 0, 10)
-		}
-		groupedSources[groupIndex] = append(groupedSources[groupIndex], source)
-		innerIndex++
 		if innerIndex == 10 {
 			groupIndex++
 			innerIndex = 0
 		}
+		if len(groupedSources) <= groupIndex {
+			groupedSources = append(groupedSources, make([]string, 0, 10))
+		}
+		groupedSources[groupIndex] = append(groupedSources[groupIndex], source)
+		innerIndex++
 	}
 
 	return groupedSources, nil
@@ -72,77 +67,123 @@ func (kdb *KismetDatabase) Tables() ([]string, error) {
 		if errors.Is(rowsOfTables.Err(), sql.ErrNoRows) {
 			return nil, fmt.Errorf("failed getting tables, no rows: %w", err)
 		}
-		t := new(table)
-
+		var t string
 		if err = rowsOfTables.Scan(&t); err != nil {
 			return nil, fmt.Errorf("failed scanning sqlite table: %w", err)
 		}
-		tables = append(tables, t.Name.String)
+		tables = append(tables, t)
 	}
 
 	return tables, nil
 }
 
-func ingestTenSources(tx *sql.Tx, tableNames []string, sources []string) error {
+type mergeTx struct {
+	alias string
+	tx    *sql.Tx
+}
+
+func newMergeTx(source, alias string, target *KismetDatabase) (*mergeTx, error) {
+	tx, err := target.conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	if _, err = tx.Exec(attachQuery(source, alias)); err != nil {
+		return nil, fmt.Errorf("failed to attach %s: %w", source, err)
+	}
+	return &mergeTx{alias: alias, tx: tx}, nil
+}
+
+func ingestTenSources(target *KismetDatabase, tableNames []string, sources []string) error {
 	if len(sources) > 10 {
 		return errors.New("oversized sources slice")
 	}
 
 	var (
-		runItUp = make(chan string, len(sources))
+		merges  = make(chan *mergeTx, len(sources))
 		errs    = make(chan error, len(sources))
 		wg      sync.WaitGroup
-		doneCh  = make(chan struct{}, 1)
+		doneCh1 = make(chan struct{}, 1)
 	)
 
 	for i, source := range sources {
 		wg.Add(1)
-		go func() {
+		go func(ii int) {
 			defer wg.Done()
 			if err := checkSource(source); err != nil {
 				errs <- err
 			}
 			println("attaching " + source + "...")
-			sourceAlias := "db" + strconv.Itoa(i)
-			if _, err := tx.Exec(attachQuery(source, sourceAlias)); err != nil {
-				errs <- fmt.Errorf("failed to attach %s: %w", source, err)
+			sourceAlias := "db" + strconv.Itoa(ii)
+			tx, err := newMergeTx(source, sourceAlias, target)
+			if err != nil {
+				errs <- err
 			}
-		}()
+			merges <- tx
+		}(i)
 	}
 
 	wg2 := sync.WaitGroup{}
 
 	go func() {
 		wg.Wait()
-		close(runItUp)
+		close(merges)
 		wg2.Wait()
-		close(doneCh)
+		close(doneCh1)
 	}()
 
-	for inc := range runItUp {
+	for incomingMergeTx := range merges {
 		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
+
+		go func(mtx *mergeTx) {
+			wg3 := sync.WaitGroup{}
+
 			for _, t := range tableNames {
-				wg2.Add(1)
-				go func() {
-					defer wg2.Done()
-					println("inserting " + inc + "...")
-					if err := attachedInsert(tx, t, inc); err != nil {
-						errs <- err
+				wg3.Add(1)
+				go func(tn string) {
+					println("inserting values from", mtx.alias, "for table", tn)
+
+					var err = &SQLiteError{}
+
+					ins := func() *SQLiteError {
+						return mtx.attachedInsert(tn, mtx.alias)
 					}
-				}()
+
+					//goland:noinspection GoDirectComparisonOfErrors
+					for {
+						err = ins()
+						if (err != nil && !err.IsBusy()) || err == nil {
+							break
+						}
+						println(mtx.alias + "." + tn + ": database busy, waiting...")
+						entropy.RandSleepMS(800)
+					}
+					if err != nil {
+						errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtx.alias, tn, err.e)
+					}
+
+					wg3.Done()
+				}(t)
 			}
-			println("detaching " + inc + "...")
-			if _, err := tx.Exec(detachQuery(inc)); err != nil {
-				errs <- err
+
+			wg3.Wait()
+
+			if _, err := mtx.tx.Prepare(detachQuery(mtx.alias)); err != nil {
+				errs <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
 			}
-		}()
+
+			println("committing " + mtx.alias + "...")
+			if err := mtx.tx.Commit(); err != nil {
+				errs <- fmt.Errorf("failed to commit transaction: %w", err)
+			}
+
+			wg2.Done()
+
+		}(incomingMergeTx)
 	}
 
 snoozin:
 	select {
-	case <-doneCh:
+	case <-doneCh1:
 		return nil
 	case e := <-errs:
 		if e == nil {
@@ -152,11 +193,17 @@ snoozin:
 	}
 }
 
-func attachedInsert(tx *sql.Tx, table, alias string) error {
-	_, err := tx.Query("INSERT OR IGNORE INTO ? SELECT * FROM ?.?;",
-		table, alias, table,
-	)
-	return err
+func (mtx *mergeTx) attachedInsert(table, alias string) *SQLiteError {
+	if table == "" {
+		return NewSQLiteError(errors.New("blank table during attempted merge from " + alias))
+	}
+	if alias == "" {
+		return NewSQLiteError(errors.New("blank alias during attempted merge of " + table))
+	}
+
+	_, err := mtx.tx.Exec(fmt.Sprintf("INSERT OR IGNORE INTO '%s' SELECT * FROM %s.%s", table, alias, table))
+
+	return NewSQLiteError(err)
 }
 
 func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
@@ -170,21 +217,13 @@ func MergeKismetDatabases(target *KismetDatabase, sources ...string) error {
 		return err
 	}
 
-	var tx *sql.Tx
-
-	if tx, err = target.conn.Begin(); err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-
 	for _, group := range grouped {
-		if err = ingestTenSources(tx, tableNames, group); err != nil {
+		if err = ingestTenSources(target, tableNames, group); err != nil {
 			return err
 		}
 	}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("sql transaction failed: %w", err)
-	}
+	println("committing...")
 
 	return nil
 }

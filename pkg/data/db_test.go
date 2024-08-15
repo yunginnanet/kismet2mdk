@@ -28,7 +28,12 @@ func TestOpenKismetDatabase(t *testing.T) {
 		if len(related) == 0 {
 			t.Fatal("no related macs found, may be a bad target MAC, please use a MAC with known results")
 		}
+		seen := make(map[string]bool)
 		for _, mac := range related {
+			if _, ok := seen[mac]; ok {
+				t.Errorf("duplicate MAC: %s", mac)
+			}
+			seen[mac] = true
 			t.Log(mac)
 		}
 	})

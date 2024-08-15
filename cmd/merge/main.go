@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"git.tcp.direct/kayos/kismet2mdk/pkg/data"
@@ -13,7 +14,15 @@ func main() {
 	var target string
 	var sources = make([]string, 0, len(os.Args[1:])-1)
 	for i, arg := range os.Args[1:] {
-		if _, err := os.Stat(arg); err != nil {
+		_, err := os.Stat(arg)
+		if errors.Is(err, os.ErrNotExist) && i == 0 {
+			var f *os.File
+			f, err = os.Create(arg)
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		if err != nil {
 			println("kismet db access failure: ", err.Error())
 			os.Exit(1)
 		}

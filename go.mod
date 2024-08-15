@@ -3,6 +3,7 @@ module git.tcp.direct/kayos/kismet2mdk
 go 1.22.5
 
 require (
+	git.tcp.direct/kayos/common v1.0.0
 	github.com/bytedance/sonic v1.12.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/glebarez/go-sqlite v1.22.0
@@ -24,9 +25,10 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/sys v0.15.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
 	modernc.org/libc v1.37.6 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.7.2 // indirect
 	modernc.org/sqlite v1.28.0 // indirect
+	nullprogram.com/x/rng v1.1.0 // indirect
 )

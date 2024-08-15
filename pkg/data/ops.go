@@ -10,17 +10,7 @@ import (
 	"github.com/l0nax/go-spew/spew"
 )
 
-/*
-WITH TalkedTo AS ( SELECT * FROM packets WHERE destmac = 'TA:RG:ET:MAC:AD:DR' ), Responded AS ( SELECT * FROM packets WHERE sourcemac = 'TA:RG:ET:MAC:AD:DR' )
-SELECT sourcemac FROM TalkedTo
-UNION
-SELECT destmac FROM Responded;
-*/
-
-const queryfmt = `
-SELECT DISTINCT sourcemac FROM packets WHERE destmac = ?;
-SELECT DISTINCT destmac FROM packets WHERE sourcemac = ?;
-`
+const queryfmt = `SELECT DISTINCT * FROM (SELECT sourcemac FROM packets WHERE destmac = ? UNION SELECT destmac FROM packets WHERE sourcemac = ?);`
 
 func (kdb *KismetDatabase) FindRelatedMacs(mac string) ([]string, error) {
 	return kdb.FindRelatedMacsCtx(context.Background(), mac)
