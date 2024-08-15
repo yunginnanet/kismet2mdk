@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"git.tcp.direct/kayos/common/entropy"
 )
@@ -131,6 +132,8 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 		close(doneCh1)
 	}()
 
+	var waitExp = &atomic.Int64{}
+
 	for incomingMergeTx := range merges {
 		wg2.Add(1)
 
@@ -154,8 +157,9 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 						if (err != nil && !err.IsBusy()) || err == nil {
 							break
 						}
-						println(mtx.alias + "." + tn + ": database busy, waiting...")
-						entropy.RandSleepMS(800)
+						waitExp.Add(1)
+						println(mtx.alias + "." + tn + ": database busy (" + strconv.Itoa(int(waitExp.Load())) + "), waiting...")
+						entropy.RandSleepMS(100 * int(waitExp.Load()))
 					}
 					if err != nil {
 						errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtx.alias, tn, err.e)
