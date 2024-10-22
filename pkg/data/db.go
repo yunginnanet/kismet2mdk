@@ -121,16 +121,26 @@ func OpenKismetDatabase(path string) (*KismetDatabase, error) {
 }
 
 func (kdb *KismetDatabase) tables() (*sql.Rows, error) {
-	return kdb.conn.Query("SELECT name FROM sqlite_master WHERE type='table'")
+	rows, err := kdb.conn.Query("SELECT name FROM sqlite_master WHERE type='table'")
+	if err != nil {
+		err = fmt.Errorf("failed to get tables for '%s': %w", kdb.path, err)
+	}
+	return rows, err
 }
 
 func (kdb *KismetDatabase) Vacuum() error {
 	_, err := kdb.conn.Exec("VACUUM")
+	if err != nil {
+		err = fmt.Errorf("failed to vacuum '%s': %w", kdb.path, err)
+	}
 	return err
 }
 
 func (kdb *KismetDatabase) Analyze() error {
 	_, err := kdb.conn.Exec("ANALYZE")
+	if err != nil {
+		err = fmt.Errorf("failed to analyze '%s': %w", kdb.path, err)
+	}
 	return err
 }
 
@@ -140,5 +150,9 @@ func (kdb *KismetDatabase) Close() error {
 			_ = os.RemoveAll(td)
 		}(kdb.newTmpDir)
 	}
-	return kdb.conn.Close()
+	err := kdb.conn.Close()
+	if err != nil {
+		err = fmt.Errorf("failed to close '%s': %w", kdb.path, err)
+	}
+	return err
 }
