@@ -11,14 +11,17 @@ import (
 func optimize(targetDB *data.KismetDatabase) error {
 	var err error
 
+	println("enabling WAL...")
 	if err = targetDB.EnableWAL(true); err != nil {
 		return err
 	}
 
+	println("enabling async...")
 	if err = targetDB.EnableAsync(true); err != nil {
 		return err
 	}
 
+	println("setting journal size limit...")
 	err = targetDB.JournalSizeLimit(6144000)
 
 	return err
@@ -79,10 +82,15 @@ func main() {
 			println(err.Error())
 			os.Exit(1)
 		}
+		println("pragma restored")
+
 		if err = targetDB.Close(); err != nil {
 			println(err.Error())
 			os.Exit(1)
 		}
+		println("db closed")
+
+		println("fin.")
 
 		os.Exit(0)
 	}()
@@ -91,6 +99,4 @@ func main() {
 		print(err.Error())
 		os.Exit(1)
 	}
-
-	println("fin.")
 }

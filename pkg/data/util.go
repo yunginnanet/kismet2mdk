@@ -100,10 +100,9 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 	}
 
 	var (
-		merges  = make(chan *mergeTx, len(sources))
-		errs    = make(chan error, len(sources))
-		wg      sync.WaitGroup
-		doneCh1 = make(chan struct{}, 1)
+		merges = make(chan *mergeTx, len(sources))
+		errs   = make(chan error, len(sources))
+		wg     sync.WaitGroup
 	)
 
 	for i, source := range sources {
@@ -113,8 +112,9 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 			if err := checkSource(source); err != nil {
 				errs <- err
 			}
-			println("attaching " + source + "...")
+
 			sourceAlias := "db" + strconv.Itoa(ii)
+			println("attaching " + source + " as " + sourceAlias + "...")
 			tx, err := newMergeTx(source, sourceAlias, target)
 			if err != nil {
 				errs <- err
@@ -128,19 +128,13 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 	go func() {
 		wg.Wait()
 		close(merges)
-		// wg2.Wait()
-		close(doneCh1)
 	}()
 
 	var waitExp = &atomic.Int64{}
 	waitExp.Add(1)
 
 	for incomingMergeTx := range merges {
-		// wg2.Add(1)
-
 		mtx := incomingMergeTx
-
-		// go func(mtx *mergeTx) {
 		wg3 := sync.WaitGroup{}
 
 		for _, t := range tableNames {
@@ -155,7 +149,6 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 				println("inserting values from", mtxInner.alias, "for table", tn)
 
 				var err = &SQLiteError{}
-
 				ins := func() *SQLiteError {
 					return mtxInner.attachedInsert(tn, mtxInner.alias)
 				}
@@ -184,6 +177,7 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 
 		wg3.Wait()
 
+		println("detaching", mtx.alias+"...")
 		if _, err := mtx.tx.Prepare(detachQuery(mtx.alias)); err != nil {
 			errs <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
 		}
@@ -193,21 +187,10 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 			errs <- fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
-		// wg2.Done()
-
-		// }(incomingMergeTx)
+		errs <- nil
 	}
 
-snoozin:
-	select {
-	case <-doneCh1:
-		return nil
-	case e := <-errs:
-		if e == nil {
-			goto snoozin
-		}
-		return e
-	}
+	return <-errs
 }
 
 func (mtx *mergeTx) attachedInsert(table, alias string) *SQLiteError {
