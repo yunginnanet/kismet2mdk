@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"git.tcp.direct/kayos/kismet2mdk/pkg/data"
 )
@@ -80,13 +81,15 @@ func main() {
 	defer func() {
 		if err = restorePragma(targetDB); err != nil {
 			println(err.Error())
-			os.Exit(1)
+		} else {
+			println("pragma restored")
 		}
-		println("pragma restored")
 
-		if err = targetDB.Close(); err != nil {
-			println(err.Error())
-			os.Exit(1)
+		println("closing " + targetDB.String())
+
+		for err = targetDB.Close(); err != nil; err = targetDB.Close() {
+			println(targetDB.String() + ": " + err.Error())
+			time.Sleep(1 * time.Second)
 		}
 		println("db closed")
 

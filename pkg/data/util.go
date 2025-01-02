@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -72,6 +74,9 @@ func (kdb *KismetDatabase) Tables() ([]string, error) {
 		if err = rowsOfTables.Scan(&t); err != nil {
 			return nil, fmt.Errorf("failed scanning sqlite table: %w", err)
 		}
+		if strings.Contains(t, "sqlite_stat") {
+			continue
+		}
 		tables = append(tables, t)
 	}
 
@@ -101,7 +106,8 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 
 	var (
 		merges = make(chan *mergeTx, len(sources))
-		errs   = make(chan error, len(sources))
+		errs1  = make(chan error, len(sources))
+		errs2  = make(chan error, 100)
 		wg     sync.WaitGroup
 	)
 
@@ -110,20 +116,20 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 		go func(ii int) {
 			defer wg.Done()
 			if err := checkSource(source); err != nil {
-				errs <- err
+				errs1 <- err
 			}
 
 			sourceAlias := "db" + strconv.Itoa(ii)
 			println("attaching " + source + " as " + sourceAlias + "...")
 			tx, err := newMergeTx(source, sourceAlias, target)
 			if err != nil {
-				errs <- err
+				errs1 <- err
 			}
 			merges <- tx
 		}(i)
 	}
 
-	// wg2 := sync.WaitGroup{}
+	wg2 := sync.WaitGroup{}
 
 	go func() {
 		wg.Wait()
@@ -134,11 +140,14 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 	waitExp.Add(1)
 
 	for incomingMergeTx := range merges {
+		wg2.Add(1)
+
 		mtx := incomingMergeTx
-		wg3 := sync.WaitGroup{}
+		wg3 := &sync.WaitGroup{}
+
+		wg3.Add(len(tableNames))
 
 		for _, t := range tableNames {
-			wg3.Add(1)
 			go func(mtxInner *mergeTx, tn string) {
 				defer wg3.Done()
 
@@ -169,7 +178,7 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 					entropy.RandSleepMS(100 * int(waitExp.Load()))
 				}
 				if err != nil {
-					errs <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtxInner.alias, tn, err.e)
+					errs2 <- fmt.Errorf("failed to insert values from %s for table %s: %w", mtxInner.alias, tn, err.e)
 				}
 
 			}(mtx, t)
@@ -179,18 +188,36 @@ func ingestTenSources(target *KismetDatabase, tableNames []string, sources []str
 
 		println("detaching", mtx.alias+"...")
 		if _, err := mtx.tx.Prepare(detachQuery(mtx.alias)); err != nil {
-			errs <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
+			errs2 <- fmt.Errorf("failed to detatch %s: %w", mtx.alias, err)
 		}
 
 		println("committing " + mtx.alias + "...")
 		if err := mtx.tx.Commit(); err != nil {
-			errs <- fmt.Errorf("failed to commit transaction: %w", err)
+			errs2 <- fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
-		errs <- nil
+		wg2.Done()
 	}
 
-	return <-errs
+	wg2.Wait()
+
+	close(errs2)
+
+	errGroup := make([]error, 0)
+
+	for e := range errs2 {
+		errGroup = append(errGroup, e)
+	}
+
+	close(errs1)
+
+	for e := range errs1 {
+		errGroup = append(errGroup, e)
+	}
+
+	slices.Reverse(errGroup)
+
+	return errors.Join(errGroup...)
 }
 
 func (mtx *mergeTx) attachedInsert(table, alias string) *SQLiteError {

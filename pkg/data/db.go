@@ -40,6 +40,10 @@ type KismetDatabase struct {
 	newTmpDir string
 }
 
+func (kdb *KismetDatabase) String() string {
+	return kdb.path
+}
+
 func (kdb *KismetDatabase) backupPragma(s Pragma) error {
 	var pragma string
 	if err := kdb.conn.QueryRow("PRAGMA " + string(s)).Scan(&pragma); err != nil {
